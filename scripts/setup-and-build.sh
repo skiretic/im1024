@@ -1,9 +1,9 @@
 #!/bin/bash
 #
-# 86Box macOS ARM64 (Apple Silicon) — Setup & Build Script
+# 86Box macOS Setup & Build Script (arm64 Homebrew, x86_64 MacPorts)
 #
 # Usage:
-#   ./scripts/setup-and-build.sh deps      Install required Homebrew dependencies
+#   ./scripts/setup-and-build.sh deps      Install dependencies (arm64: Homebrew, x86_64: MacPorts)
 #   ./scripts/setup-and-build.sh build      Clean configure + build + codesign .app
 #   ./scripts/setup-and-build.sh            Show help
 #
@@ -26,6 +26,11 @@ error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 # deps — install Homebrew packages
 # ---------------------------------------------------------------------------
 cmd_deps() {
+    if [[ "$(uname -m)" == "x86_64" ]]; then
+        cmd_deps_macports
+        return
+    fi
+
     info "Checking for Homebrew..."
     if ! command -v brew &>/dev/null; then
         error "Homebrew not found. Install it from https://brew.sh"
@@ -41,23 +46,84 @@ cmd_deps() {
 }
 
 # ---------------------------------------------------------------------------
+# deps on Intel -- MacPorts (Homebrew no longer builds x86_64 bottles)
+# ---------------------------------------------------------------------------
+cmd_deps_macports() {
+    local port=/opt/local/bin/port
+    local qt5_portfile=/opt/local/var/macports/sources/rsync.macports.org/macports/release/tarballs/ports/aqua/qt5/Portfile
+
+    [[ -x "$port" ]] || error "MacPorts not found. Install it from https://www.macports.org/install.php"
+
+    info "Syncing the MacPorts tree..."
+    sudo "$port" selfupdate
+
+    # selfupdate can restore the stock Portfile, so patch after it. Vulkan on:
+    # MOLTENVK=ON needs QT_CONFIG(vulkan). qttools' clang dependency only
+    # feeds qdoc and would cost a full llvm build.
+    info "Patching the qt5 Portfile..."
+    sudo sed -i '' \
+        -e 's/-no-feature-vulkan/-feature-vulkan/g' \
+        -e '/VULKAN_SDK=/!s/configure.env-append MAKE=/configure.env-append VULKAN_SDK=${prefix} MAKE=/' \
+        -e 's/"port:clang-\${llvm_version}"/""/' \
+        "$qt5_portfile"
+    if grep -q -e '-no-feature-vulkan' -e 'port:clang-' "$qt5_portfile"; then
+        error "qt5 Portfile patch did not apply: $qt5_portfile"
+    fi
+
+    info "Installing dependencies..."
+    sudo "$port" install cmake ninja pkgconfig vulkan-headers vulkan-loader MoltenVK \
+        SDL3 rtmidi openal-soft fluidsynth libslirp vde2 libserialport \
+        libpng freetype zstd libsndfile
+
+    # -s covers every dependency of the ports it installs, so Qt's own
+    # dependencies go first and take binary archives where they exist.
+    info "Installing Qt 5 dependencies..."
+    sudo "$port" install '(' rdepof:qt5-qtbase or rdepof:qt5-qttools or rdepof:qt5-qtimageformats ')' \
+        and not '(' qt5-qtbase or qt5-qtdeclarative or qt5-qtsvg or qt5-qttools or qt5-qtimageformats ')'
+
+    # From source so a Vulkan-off binary archive is never used. The app bundle
+    # needs qtimageformats for the ICNS plugin.
+    info "Building Qt 5 from source (long)..."
+    sudo "$port" -s install qt5-qtbase qt5-qttools qt5-qtimageformats
+
+    info "Dependencies installed."
+    echo ""
+    info "Next step:  ./scripts/setup-and-build.sh build"
+}
+
+# ---------------------------------------------------------------------------
 # build — configure, compile, codesign
 # ---------------------------------------------------------------------------
 cmd_build() {
     cd "$REPO_ROOT"
 
-    # Verify ARM64 macOS
-    if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
-        error "This script targets macOS on Apple Silicon (arm64)."
+    if [[ "$(uname -s)" != "Darwin" ]]; then
+        error "This script targets macOS."
     fi
 
     NCPU="$(sysctl -n hw.ncpu)"
     BUILD_DIR="build"
 
-    # Resolve Homebrew prefixes
-    QT5_ROOT="$(brew --prefix qt@5)"
-    OPENAL_ROOT="$(brew --prefix openal-soft)"
-    LIBSERIALPORT_ROOT="$(brew --prefix libserialport)"
+    # arm64 builds against Homebrew, x86_64 against MacPorts
+    case "$(uname -m)" in
+        arm64)
+            QT5_ROOT="$(brew --prefix qt@5)"
+            OPENAL_ROOT="$(brew --prefix openal-soft)"
+            LIBSERIALPORT_ROOT="$(brew --prefix libserialport)"
+            PLATFORM_ARGS=(--toolchain ./cmake/llvm-macos-aarch64.cmake)
+            MVK_CANDIDATE=/opt/homebrew/lib/libMoltenVK.dylib
+            ;;
+        x86_64)
+            QT5_ROOT=/opt/local/libexec/qt5
+            OPENAL_ROOT=/opt/local
+            LIBSERIALPORT_ROOT=/opt/local
+            PLATFORM_ARGS=(-D MOLTENVK_INCLUDE_DIR=/opt/local/include)
+            MVK_CANDIDATE=/opt/local/lib/libMoltenVK.dylib
+            ;;
+        *)
+            error "Unsupported architecture: $(uname -m)"
+            ;;
+    esac
 
     # Sanity-check that key deps exist
     for pkg in "$QT5_ROOT" "$OPENAL_ROOT" "$LIBSERIALPORT_ROOT"; do
@@ -73,7 +139,7 @@ cmd_build() {
     # Configure
     info "Configuring (CMake)..."
     cmake -S . -B "$BUILD_DIR" --preset regular \
-        --toolchain ./cmake/llvm-macos-aarch64.cmake \
+        "${PLATFORM_ARGS[@]}" \
         -D NEW_DYNAREC=ON \
         -D QT=ON \
         -D MOLTENVK=ON \
@@ -93,8 +159,8 @@ cmd_build() {
     # the signature. Absence is not fatal; the Vulkan renderer just stays off.
     FW_DIR="$BUILD_DIR/src/86Box.app/Contents/Frameworks"
     MVK_SRC=""
-    if [[ -e /opt/homebrew/lib/libMoltenVK.dylib ]]; then
-        MVK_SRC=/opt/homebrew/lib/libMoltenVK.dylib
+    if [[ -e "$MVK_CANDIDATE" ]]; then
+        MVK_SRC="$MVK_CANDIDATE"
     fi
     if [[ -n "$MVK_SRC" ]]; then
         info "Staging libMoltenVK ($MVK_SRC) for the Vulkan renderer's dlopen..."
@@ -117,7 +183,7 @@ cmd_build() {
         install_name_tool -add_rpath "@executable_path/../Frameworks" \
             "$BUILD_DIR/src/86Box.app/Contents/MacOS/86Box" 2>/dev/null || true
     else
-        warn "libMoltenVK.dylib not found (brew install molten-vk) -- the Vulkan"
+        warn "libMoltenVK.dylib not found at $MVK_CANDIDATE -- the Vulkan"
         warn "renderer will fall back to a host Vulkan loader, or stay off."
     fi
 
@@ -139,15 +205,15 @@ cmd_build() {
 # help
 # ---------------------------------------------------------------------------
 cmd_help() {
-    echo "86Box macOS ARM64 Build Script"
+    echo "86Box macOS Build Script"
     echo ""
     echo "Usage:"
-    echo "  ./scripts/setup-and-build.sh deps    Install Homebrew dependencies"
+    echo "  ./scripts/setup-and-build.sh deps    Install dependencies"
     echo "  ./scripts/setup-and-build.sh build   Clean build + codesign .app"
     echo ""
     echo "Requirements:"
-    echo "  - macOS on Apple Silicon (arm64)"
-    echo "  - Homebrew (https://brew.sh)"
+    echo "  - arm64: Homebrew (https://brew.sh)"
+    echo "  - x86_64: MacPorts (https://www.macports.org)"
     echo "  - Xcode Command Line Tools (xcode-select --install)"
 }
 
