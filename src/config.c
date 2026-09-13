@@ -781,14 +781,14 @@ load_input_devices(void)
         keyboard_type = KEYBOARD_TYPE_PC_XT;
 
     p = ini_section_get_string(cat, "mouse_type", NULL);
-    if (p != NULL)
+    if (p != NULL) {
         mouse_type = mouse_get_from_internal_name(p);
-    else
-        mouse_type = 0;
 
-    // Migration.
-    if (tablet_get_from_internal_name(p) && mouse_type == 0)
-        ini_section_set_string(cat, "tablet_type", p);
+        // Migration.
+        if (tablet_get_from_internal_name(p) && mouse_type == 0)
+            ini_section_set_string(cat, "tablet_type", p);
+    } else
+        mouse_type = 0;
 
     p = ini_section_get_string(cat, "tablet_type", NULL);
     if (p != NULL)
@@ -1578,6 +1578,21 @@ load_hard_disks(void)
                &hdd[c].spt, &hdd[c].hpc, &hdd[c].tracks, (int *) &hdd[c].wp, s);
 
         hdd[c].bus_type = hdd_string_to_bus(s, 0);
+        memset(hdd[c].custom_vendor, 0, sizeof(hdd[c].custom_vendor));
+        memset(hdd[c].custom_model, 0, sizeof(hdd[c].custom_model));
+        memset(hdd[c].custom_version, 0, sizeof(hdd[c].custom_version));
+        sprintf(temp, "hdd_%02i_vendor", c + 1);
+        p = ini_section_get_string(cat, temp, NULL);
+        if (p)
+            strncpy(hdd[c].custom_vendor, p, sizeof(hdd[c].custom_vendor) - 1);
+        sprintf(temp, "hdd_%02i_model", c + 1);
+        p = ini_section_get_string(cat, temp, NULL);
+        if (p)
+            strncpy(hdd[c].custom_model, p, sizeof(hdd[c].custom_model) - 1);
+        sprintf(temp, "hdd_%02i_revision", c + 1);
+        p = ini_section_get_string(cat, temp, NULL);
+        if (p)
+            strncpy(hdd[c].custom_version, p, sizeof(hdd[c].custom_version) - 1);
         switch (hdd[c].bus_type) {
             default:
             case HDD_BUS_DISABLED:
@@ -4169,6 +4184,25 @@ save_hard_disks(void)
             ini_section_delete_var(cat, temp);
         else
             ini_section_set_string(cat, temp, hdd_preset_get_internal_name(hdd[c].speed_preset));
+
+        sprintf(temp, "hdd_%02i_vendor", c + 1);
+        if ((hdd[c].bus_type == HDD_BUS_IDE || hdd[c].bus_type == HDD_BUS_ATAPI || hdd[c].bus_type == HDD_BUS_SCSI) &&
+            hdd_preset_is_generic(hdd[c].speed_preset) && hdd[c].custom_vendor[0])
+            ini_section_set_string(cat, temp, hdd[c].custom_vendor);
+        else
+            ini_section_delete_var(cat, temp);
+        sprintf(temp, "hdd_%02i_model", c + 1);
+        if ((hdd[c].bus_type == HDD_BUS_IDE || hdd[c].bus_type == HDD_BUS_ATAPI || hdd[c].bus_type == HDD_BUS_SCSI) &&
+            hdd_preset_is_generic(hdd[c].speed_preset) && hdd[c].custom_model[0])
+            ini_section_set_string(cat, temp, hdd[c].custom_model);
+        else
+            ini_section_delete_var(cat, temp);
+        sprintf(temp, "hdd_%02i_revision", c + 1);
+        if ((hdd[c].bus_type == HDD_BUS_IDE || hdd[c].bus_type == HDD_BUS_ATAPI || hdd[c].bus_type == HDD_BUS_SCSI) &&
+            hdd_preset_is_generic(hdd[c].speed_preset) && hdd[c].custom_version[0])
+            ini_section_set_string(cat, temp, hdd[c].custom_version);
+        else
+            ini_section_delete_var(cat, temp);
 
         sprintf(temp, "hdd_%02i_audio", c + 1);
         if (!hdd_is_valid(c) || hdd[c].audio_profile == 0) {
